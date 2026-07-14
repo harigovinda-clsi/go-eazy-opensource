@@ -1,6 +1,35 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts"
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.0'
-import { hmac } from "https://deno.land/x/hmac@v1.0.3/mod.ts"
+
+// timingSafeEqual to avoid timing attacks on signatures
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false
+  const encoder = new TextEncoder()
+  const aBytes = encoder.encode(a)
+  const bBytes = encoder.encode(b)
+  let diff = 0
+  for (let i = 0; i < aBytes.length; i++) {
+    diff |= aBytes[i] ^ bBytes[i]
+  }
+  return diff === 0
+}
+
+async function verifySignature(body: string, secret: string, signature: string): Promise<boolean> {
+  const encoder = new TextEncoder()
+  const key = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  )
+  const mac = await crypto.subtle.sign('HMAC', key, encoder.encode(body))
+  const computed = Array.from(new Uint8Array(mac))
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('')
+
+  return timingSafeEqual(computed, signature)
+}
 
 serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
@@ -12,14 +41,14 @@ serve(async (req: Request) => {
     const webhookSecret = Deno.env.get('RAZORPAY_WEBHOOK_SECRET')
 
     if (!signature || !webhookSecret) {
-      return new Response(JSON.stringify({ error: 'Missing security configuration context' }), { status: 400 })
+      return new Response(JSON.stringify({ error: 'Missing security configuration' }), { status: 400 })
     }
 
     const rawBody = await req.text()
-    const expectedSignature = hmac("sha256", webhookSecret, rawBody, "utf8", "hex")
+    const isValid = await verifySignature(rawBody, webhookSecret, signature)
 
-    if (signature !== expectedSignature) {
-      return new Response(JSON.stringify({ error: 'Untrusted signature match failure' }), { status: 401 })
+    if (!isValid) {
+      return new Response(JSON.stringify({ error: 'Signature match failure' }), { status: 401 })
     }
 
     const eventData = JSON.parse(rawBody)
