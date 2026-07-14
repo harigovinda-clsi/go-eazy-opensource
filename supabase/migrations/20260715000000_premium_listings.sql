@@ -52,3 +52,19 @@ ON public.premium_listings
 FOR UPDATE
 USING (true)
 WITH CHECK (true);
+-- ── AUTOMATED TIMESTAMP MAINTENANCE ──
+
+-- 1. Create a reusable function to handle updated_at timestamps automatically
+CREATE OR REPLACE FUNCTION public.handle_update_timestamp()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = timezone('utc'::text, now());
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- 2. Bind the trigger to the premium_listings table
+CREATE TRIGGER set_premium_listings_timestamp
+    BEFORE UPDATE ON public.premium_listings
+    FOR EACH ROW
+    EXECUTE FUNCTION public.handle_update_timestamp();
