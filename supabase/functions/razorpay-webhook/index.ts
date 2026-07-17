@@ -52,28 +52,73 @@ serve(async (req: Request) => {
     }
 
     const eventData = JSON.parse(rawBody)
-    
-    if (eventData.event === 'order.paid') {
-      const payload = eventData.payload.payment.entity
-      const userId = payload.notes?.user_id
+    const event = eventData.event
 
-      if (userId) {
+    // Match either standard captured payments or generalized paid orders
+    if (event === 'payment.captured' || event === 'order.paid') {
+      const payload = eventData.payload?.payment?.entity || eventData.payload?.order?.entity
+      if (!payload) throw new Error('Malformed Razorpay payload structure')
+
+      const orderId = payload.order_id
+      const paymentId = payload.id
+      const notes = payload.notes || {}
+
+      // Identify if this transaction belongs to a premium promotion flow
+      if (notes.purpose === 'premium_promotion' || notes.property_id) {
+        const landlordId = notes.landlord_id || notes.user_id
+        const propertyId = notes.property_id
+        const propertyTitle = notes.property_title || 'Your Property'
+
+        const startDate = new Date()
+        const expiryDate = new Date()
+        expiryDate.setDate(startDate.getDate() + 30) // Premium period: 30 Days
+
         const supabaseAdmin = createClient(
           Deno.env.get('SUPABASE_URL')!,
           Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
           { auth: { persistSession: false } }
         )
 
-        // Mark user transaction or listing active in database
-        await supabaseAdmin
-          .from('profiles')
-          .update({ premium_status: true, updated_at: new Date().toISOString() })
-          .eq('id', userId)
+        // 1. Activate premium listing row tracking
+        if (propertyId && orderId) {
+          const { error: promoError } = await supabaseAdmin
+            .from('premium_listings')
+            .update({
+              status: 'active',
+              razorpay_payment_id: paymentId,
+              starts_at: startDate.toISOString(),
+              expires_at: expiryDate.toISOString(),
+              updated_at: startDate.toISOString()
+            })
+            .eq('razorpay_order_id', orderId)
+
+          if (promoError) console.error('Database pre-log activation failure:', promoError.message)
+        }
+
+        // 2. Elevate user profile flag status
+        if (landlordId) {
+          await supabaseAdmin
+            .from('profiles')
+            .update({ 
+              premium_status: true, 
+              updated_at: startDate.toISOString() 
+            })
+            .eq('id', landlordId)
+
+          // 3. Insert real-time notification
+          await supabaseAdmin
+            .from('notifications')
+            .insert({
+              user_id: landlordId,
+              message: `Payment Verified! Your listing "${propertyTitle}" has successfully been promoted to Premium for 30 days!`
+            })
+        }
       }
     }
 
     return new Response(JSON.stringify({ received: true }), { status: 200 })
   } catch (err: any) {
+    console.error('Unexpected error processing webhook:', err.message)
     return new Response(JSON.stringify({ error: err.message }), { status: 500 })
   }
 })
